@@ -2517,6 +2517,7 @@ enum faceStatus
 struct face {
     faceStatus status;
     bool bCoincide = false;
+    bool bBox = false;
     AcArray<AcGeIntArray> loops;
     AcGeVector3d normal;
     AcGePoint3dArray pts;
@@ -2531,6 +2532,7 @@ struct face {
             max.y = std::max(max.y, p.y);
             max.z = std::max(max.z, p.z);
         }
+        bBox = true;
     }
     void reverse() {
         for (auto& loop : loops) {
@@ -2782,11 +2784,14 @@ struct intersectInfo {
 
 AcArray<face*> loopsToFaces(AcArray<AcGePoint3dArray>& loops, AcGeVector3d& normal);
 
-void faceToPts(face& f, AcGePoint3dArray& pts, bool bReverse) {
+void faceToPts(face& f, AcGePoint3dArray& pts, AcGeIntArray& loopbool, bool bReverse) {
     for (auto& loop : f.loops) {
+        int next = pts.length();
         for (int i = 0; i < loop.length(); i++) {
             pts.append(f.pts[loop[bReverse ? loop.length() - i - 1 : i]]);
+            loopbool.append(i + 1 + next);
         }
+        loopbool.last() = next;
     }
 }
 
@@ -2796,14 +2801,94 @@ void invertArr(AcGeIntArray& arr, AcGeIntArray& ret) {
         ret[arr[i]] = i;
     }
 }
+
+bool ptInLoop2(const AcGePoint3d& linePt, AcGeVector3d& lineDir, face& fa) {
+    std::vector<intersectPt> arr;
+    for (auto& loop : fa.loops) {
+        AcGeDoubleArray params(loop.length());
+        AcArray<bool> isOns(loop.length());
+        AcGeVector3dArray vs(loop.length());
+        AcGeVector3dArray vsCross(loop.length());
+        AcGeDoubleArray vsCrossLength(loop.length());
+        for (int i = 0; i < loop.length(); i++) {
+            vs.append(fa.pts[loop[i]] - linePt);
+            vsCross.append(vs.last().crossProduct(lineDir));
+            vsCrossLength.append(vsCross.last().length());
+            params.append((vs.last()).dotProduct(lineDir));
+            if (params.last() > 0 && (linePt + lineDir * params.last()).isEqualTo(fa.pts[loop[i]])) {
+                isOns.append(true);
+            }
+            else {
+                isOns.append(false);
+            }
+        }
+
+        for (int i = 0; i < loop.length(); i++) {
+            int prev = i - 1;
+            if (i == 0) {
+                prev = loop.length() - 1;
+            }
+            int next = i + 1;
+            if (i == loop.length() - 1) {
+                next = 0;
+            }
+            if (isOns[i]) {//Æðµã½»µã
+                if (isOns[next] || isOns[prev]) {//Î²²¿½»µã£¬µ±Ç°¶Î»òÇ°¶ÎÎªÖØºÏ¶Î
+                    arr.push_back({ unknow ,fa.pts[loop[i]], params[i] });
+                }
+                else if (vsCross[i].dotProduct(vsCross[prev]) > 0) {//·½ÏòÒ»ÖÂ
+                    arr.push_back({ unchange ,fa.pts[loop[i]], params[i] });
+                }
+                else {
+                    arr.push_back({ change ,fa.pts[loop[i]], params[i] });
+                }
+            }
+            else if (!isOns[next]) {//¿ÉÄÜÓÐÒ»¸öÄÚ²¿½»µã
+                if (vsCross[i].dotProduct(vsCross[next]) < 0) {//ÓÐÄÚ²¿½»µã£¬Á½¸ö¶Ëµã·Ö²¼ÔÚÁ½²à
+                    //¼ÆËãÄÚ²¿½»µã
+                    double param = vs[i].crossProduct(vs[next]).length() / (vsCrossLength[i] + vsCrossLength[next]);
+                    if ((vs[i] + vs[next]).dotProduct(lineDir) > 0) {
+                        arr.push_back({ change ,linePt + param * lineDir, param });
+                    }
+                }
+            }
+        }
+    }
+
+    std::sort(arr.begin(), arr.end(), [](intersectPt& i, intersectPt& j) {return i.param > j.param; });
+    Edgelocate lastLocate = out;
+    for (int i = 0; i < (int)arr.size(); i++) {
+        if (lastLocate == out) {
+            if (arr[i].status != unchange) {
+                lastLocate = in;
+            }
+            else {
+                lastLocate = out;
+            }
+        }
+        else if (lastLocate == in) {
+            if (arr[i].status != change) {
+                lastLocate = in;
+            }
+            else {
+                lastLocate = out;
+            }
+        }
+    }
+    return lastLocate == in;
+}
+
 //²ÉÓÃÉäÏßÇó½»
-bool ptInLoop(const AcGePoint3d& pt, AcGeVector3d& dir, AcGePoint3dArray& pts) {
+bool ptInLoop(const AcGePoint3d& pt, AcGeVector3d& dir, AcGePoint3dArray& pts, AcArray<bool>& loop) {
     AcGeVector3dArray vs(pts.length());
     for (int i = 0; i < pts.length(); i++) {
         vs.append(pts[i] - pt);
     }
     int intersectCount = 0;
     for (int i = 0; i < vs.length(); i++) {
+        if (!loop[i]) {
+            continue;
+        }
         const AcGeVector3d& v0 = vs[i];
         const AcGeVector3d& v1 = (i == vs.length() - 1) ? vs[0] : vs[i + 1];
         const AcGeVector3d u1 = dir.crossProduct(v0);
@@ -2833,10 +2918,18 @@ bool ptInLoop(const AcGePoint3d& pt, AcGeVector3d& dir, AcGePoint3dArray& pts) {
 }
 
 AcArray<face*> facefaceWithNoIntersectPts(face& fa, face& fb, AcGePoint3dArray& faPts, AcGePoint3dArray& fbPts, bool bInner) {
+    if (!fa.bBox) {
+        fa.caculateBox();
+    }
+    if (!fb.bBox) {
+        fb.caculateBox();
+    }
     AcArray<face*> ret;
-    if (fa.min.x < fb.min.x && fa.max.x > fb.max.x && fa.min.y < fb.min.y && fa.max.y > fb.max.y && fa.min.z < fb.min.z && fa.max.z > fb.max.z) {
+    if ((fa.min.x < fb.min.x && fa.max.x > fb.max.x) || 
+        (fa.min.y < fb.min.y && fa.max.y > fb.max.y) || 
+        (fa.min.z < fb.min.z && fa.max.z > fb.max.z)) {
         //fa¿ÉÄÜ°üº¬fb
-        if (ptInLoop(fb.pts[0], fb.normal.perpVector(), faPts)) {
+        if (ptInLoop2(fb.pts[0], fb.normal.perpVector(), fa)) {
             if (bInner) {
                 ret.append(new face(fb));
             }
@@ -2857,8 +2950,10 @@ AcArray<face*> facefaceWithNoIntersectPts(face& fa, face& fb, AcGePoint3dArray& 
             }
         }
     }
-    if (fa.min.x > fb.min.x && fa.max.x < fb.max.x && fa.min.y > fb.min.y && fa.max.y < fb.max.y && fa.min.z > fb.min.z && fa.max.z < fb.max.z) {
-        if (ptInLoop(fa.pts[0], fa.normal.perpVector(), fbPts)) {
+    if ((fa.min.x > fb.min.x && fa.max.x < fb.max.x) ||
+        (fa.min.y > fb.min.y && fa.max.y < fb.max.y) || 
+        (fa.min.z > fb.min.z && fa.max.z < fb.max.z)) {
+        if (ptInLoop2(fa.pts[0], fa.normal.perpVector(), fb)) {
             if (bInner) {
                 ret.append(new face(fa));
             }
@@ -2882,18 +2977,61 @@ void dealWithCoLine(AcGePoint3d& p0,AcGeVector3d& vq0p0, AcGeVector3d& vq0p1, Ac
     }
 }
 
+void getNextArrFor(AcArray<intersectInfo>& intersection_Point, AcGeIntArray& intersection_Pointa, AcGeIntArray& intersection_Pointb,
+    AcGeIntArray& intersection_PointaNext, AcGeIntArray& intersection_PointbNext, face& fa, face& fb) {
+    intersection_PointaNext.setLogicalLength(intersection_Point.length());
+    intersection_PointbNext.setLogicalLength(intersection_Point.length());
+    int lastNumVert = 0;
+    int lastEnd = 0;
+    for (auto& loop : fa.loops) {
+        lastNumVert = loop.length() + lastNumVert;
+        int curEnd = lastEnd;
+        while (curEnd < intersection_Point.length() && intersection_Point[intersection_Pointa[curEnd]].p1 < lastNumVert) {
+            curEnd++;
+        }
+        for (int i = lastEnd; i < curEnd; i++) {
+            if (i == curEnd - 1) {
+                intersection_PointaNext[i] = lastEnd;
+            }
+            else {
+                intersection_PointaNext[i] = i + 1;
+            }
+        }
+        lastEnd = curEnd;
+    }
+    lastNumVert = 0;
+    lastEnd = 0;
+    for (auto& loop : fb.loops) {
+        lastNumVert = loop.length() + lastNumVert;
+        int curEnd = lastEnd;
+        while (curEnd < intersection_Point.length() && intersection_Point[intersection_Pointb[curEnd]].p2 < lastNumVert) {
+            curEnd++;
+        }
+        for (int i = lastEnd; i < curEnd; i++) {
+            if (i == curEnd - 1) {
+                intersection_PointbNext[i] = lastEnd;
+            }
+            else {
+                intersection_PointbNext[i] = i + 1;
+            }
+        }
+        lastEnd = curEnd;
+    }
+}
+
 AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐÎ£¬fbÎª²Ã¼ô¶à±ßÐÎ¡£ÄÚ²Ã¼ô
     //fa£¬fb¶¼Îªµ¥»·,¿ÉÒÔÎª¶à»·
     AcGePoint3dArray datap0;
     AcGePoint3dArray dataq0;
-    faceToPts(fa, datap0, false); faceToPts(fb, dataq0, !bInner);
+    AcGeIntArray loop0, loop1;//µ±Ç°¶¥µãµÄÏÂÒ»¸ö¶¥µãµÄË÷Òý
+    faceToPts(fa, datap0, loop0, false); faceToPts(fb, dataq0, loop1, !bInner);
     AcArray<intersectInfo> intersection_Point;
     for (int i = 0; i < datap0.length(); i++) {
         for (int j = 0; j < dataq0.length(); j++) {
             AcGePoint3d& p0 = datap0[i];
-            AcGePoint3d& p1 = datap0[(i + 1) % datap0.length()];
+            AcGePoint3d& p1 = datap0[loop0[i]];
             AcGePoint3d& q0 = dataq0[j];
-            AcGePoint3d& q1 = dataq0[(j + 1) % dataq0.length()];
+            AcGePoint3d& q1 = dataq0[loop1[j]];
             AcGeVector3d vp = p1 - p0;
             AcGeVector3d vp0q1 = q1 - p0;
             AcGeVector3d v1 = vp.crossProduct(q0 - p0);
@@ -2941,6 +3079,10 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
     AcGeIntArray intersection_Pointb = intersection_Pointa;
     std::sort(intersection_Pointa.begin(), intersection_Pointa.end(), [&](const int& a, const int& b) {return intersection_Point[a].p1 < intersection_Point[b].p1; });
     std::sort(intersection_Pointb.begin(), intersection_Pointb.end(), [&](const int& a, const int& b) {return intersection_Point[a].p2 < intersection_Point[b].p2; });
+    //
+    AcGeIntArray intersection_PointaNext, intersection_PointbNext;
+    getNextArrFor(intersection_Point, intersection_Pointa, intersection_Pointb, intersection_PointaNext, intersection_PointbNext, fa, fb);
+
     //Î¬»¤Á½¸öÊý×é
     AcGeIntArray oTob;
     invertArr(intersection_Pointb, oTob);
@@ -2955,7 +3097,7 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
     visited.setLogicalLength(numOfIntsect);
     visited.setAll(false);
     int numVisit = 0;
-    for (int i = 0; numVisit < visited.length(); i++) {
+    for (int i = 0; numVisit < visited.length(); ) {
         if (i >= visited.length()) {
             i = 0;
         }
@@ -2964,6 +3106,7 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
                 rets.append(ret);
                 ret.setLogicalLength(0);
             }
+            i++;
             continue;
         }
         numVisit++;
@@ -2971,34 +3114,33 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
         ret.append(intersection_Point[intersection_Pointa[i]].pt);
         if (intersection_Point[intersection_Pointa[i]].bOut) {//¶ÔÓÚa£¬ÆäloopÔÚ´Ëµã´¦³öbµÄloop.·ñÔòÎª½øÈëbµÄloop
             //¿ªÊ¼±éÀú½»µãÐòÁÐb
-            int iteratorStart = int(floor(intersection_Point[intersection_Pointb[aTob[i]]].p2)) + 1;
-            int iteratorEnd = int(floor(intersection_Point[intersection_Pointb[(aTob[i] + 1) % numOfIntsect]].p2));
-            if (iteratorStart > iteratorEnd) {
-                if (iteratorStart == iteratorEnd + 1 && intersection_Point[intersection_Pointb[aTob[i]]].p2 < intersection_Point[intersection_Pointb[(aTob[i] + 1) % numOfIntsect]].p2) {//Á½¸ö½»µãÔÚÍ¬Ò»Çø¼ä
-                    i = bToa[(aTob[i] + 1) % numOfIntsect] - 1;
-                    continue;
-                }
-                iteratorEnd += dataq0.length();
+            int iteratorStart = int(floor(intersection_Point[intersection_Pointb[aTob[i]]].p2));
+            int iteratorEnd = int(floor(intersection_Point[intersection_Pointb[intersection_PointbNext[aTob[i]]]].p2));
+            if (iteratorStart == iteratorEnd && intersection_Point[intersection_Pointb[aTob[i]]].p2 < intersection_Point[intersection_Pointb[intersection_PointbNext[aTob[i]]]].p2) {//Á½¸ö½»µãÔÚÍ¬Ò»Çø¼ä
+                i = bToa[intersection_PointbNext[aTob[i]]];
+                continue;
             }
-            for (int j = iteratorStart; j <= iteratorEnd; j++) {
-                ret.append(dataq0[j % dataq0.length()]);
-            }
-            i = bToa[(aTob[i] + 1) % numOfIntsect] - 1;
+            do {
+                iteratorStart = loop1[iteratorStart];
+                ret.append(dataq0[iteratorStart]);
+            } while (iteratorStart != iteratorEnd);
+            i = bToa[intersection_PointbNext[aTob[i]]];
             continue;
         }
         else {
             //¿ªÊ¼±éÀú½»µãÐòÁÐa
-            int iteratorStart = int(floor(intersection_Point[intersection_Pointa[i]].p1)) + 1;
-            int iteratorEnd = int(floor(intersection_Point[intersection_Pointa[(i + 1) % numOfIntsect]].p1));
-            if (iteratorStart > iteratorEnd) {
-                if (iteratorStart == iteratorEnd + 1 && intersection_Point[intersection_Pointa[i]].p1 < intersection_Point[intersection_Pointa[(i + 1) % numOfIntsect]].p1) {//Á½¸ö½»µãÔÚÍ¬Ò»Çø¼ä
-                    continue;
-                }
-                iteratorEnd += datap0.length();
+            int iteratorStart = int(floor(intersection_Point[intersection_Pointa[i]].p1));
+            int iteratorEnd = int(floor(intersection_Point[intersection_Pointa[intersection_PointaNext[i]]].p1));
+            if (iteratorStart == iteratorEnd && intersection_Point[intersection_Pointa[i]].p1 < intersection_Point[intersection_Pointa[intersection_PointaNext[i]]].p1) {//Á½¸ö½»µãÔÚÍ¬Ò»Çø¼ä
+                i = intersection_PointaNext[i];
+                continue;
             }
-            for (int j = iteratorStart; j <= iteratorEnd; j++) {
-                ret.append(datap0[j % datap0.length()]);
-            }
+            //ÔÚaµÄÄ³¸ö»·ÉÏ´Óstartµ½end
+            do {
+                iteratorStart = loop0[iteratorStart];
+                ret.append(datap0[iteratorStart]);
+            } while (iteratorStart != iteratorEnd);
+            i = intersection_PointaNext[i];
             continue;
         }
     }
@@ -3210,7 +3352,30 @@ void compressVertex2(body* bd, body2& ret) {
     }
 }
 
+void putBigLoopFront(face& face) {
+    AcGePoint3dArray blocks;
+    blocks.setLogicalLength(face.loops.length());
+    for (int index = 0; index < face.loops.length(); index++) {
+        blocks[index] = AcGePoint3d();
+        for (auto i : face.loops[index]) {
+            blocks[index].x = std::max(blocks[index].x, face.pts[i].x);
+            blocks[index].y = std::max(blocks[index].y, face.pts[i].y);
+            blocks[index].z = std::max(blocks[index].z, face.pts[i].z);
+        }
+    }
+    AcGePoint3d pt = blocks[0];
+    int maxLoop = 0;
+    for (int i = 1; i < blocks.length(); i++) {
+        if (blocks[i].x > pt.x || blocks[i].y > pt.y || blocks[i].z > pt.z) {
+            maxLoop = i;
+            pt = blocks[i];
+        }
+    }
+    std::swap(face.loops[0], face.loops[maxLoop]);
+}
+
 void dealWithMultiLoops(face& face) {
+    putBigLoopFront(face);
     while (face.loops.length() > 1) {
         //ÇóÄÚ»·µÄ×îÔ¶µã
         AcGeIntArray& innerLoop = face.loops.last();
@@ -3315,20 +3480,38 @@ void bodyBodyBool(body& a, body& b, boolType type, body2& ret) {
     }
     ret.faces = faces;
 }
-
+void test202561(Body* body, std::string filePath);
 void BodyTobody(Body* bd, body& body) {
     for (Face* f = bd->faceList(); f != NULL; f = f->next()) {
         face* tempFace = new face();
         tempFace->normal = (f->plane().normal);
-        tempFace->loops.setLogicalLength(1);
-        std::vector<int> faceindex;
         Edge* curEdge = f->edgeLoop();
+        bool hasBrige = false;
+        AcGeIntArray tempLoop;
+        AcGeIntArray tempLoop2;
         do {
             Vertex* v = curEdge->vertex();
-            tempFace->loops[0].append(tempFace->pts.length());
-            tempFace->pts.append((v->point()));
+            if (curEdge->isBridge()) {
+                if (hasBrige) {
+                    tempFace->loops.append(tempLoop2);
+                    tempLoop2.setLogicalLength(0);
+                }
+                hasBrige = !hasBrige;
+            }
+            else {
+                if (hasBrige) {
+                    tempLoop2.append(tempFace->pts.length());
+                }
+                else {
+                    tempLoop.append(tempFace->pts.length());
+                }
+                tempFace->pts.append((v->point()));
+            }
             curEdge = curEdge->next();
         } while (curEdge != f->edgeLoop());
+        if (tempLoop.length() > 0) {
+            tempFace->loops.append(tempLoop);
+        }
         tempFace->caculateBox();
         body.faces.append(tempFace);
     }
