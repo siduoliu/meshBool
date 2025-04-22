@@ -3379,6 +3379,10 @@ void dealWithMultiLoops(face& face) {
     while (face.loops.length() > 1) {
         //求内环的最远点
         AcGeIntArray& innerLoop = face.loops.last();
+        if (innerLoop.length() < 3) {
+            face.loops.removeLast();
+            continue;
+        }
         AcGeIntArray& outterLoop = face.loops[0];
         AcGePoint3d innerPt;
         for (int i = 0; i < innerLoop.length(); i++) {
@@ -3486,35 +3490,94 @@ void BodyTobody(Body* bd, body& body) {
         face* tempFace = new face();
         tempFace->normal = (f->plane().normal);
         Edge* curEdge = f->edgeLoop();
-        bool hasBrige = false;
-        AcGeIntArray tempLoop;
-        AcGeIntArray tempLoop2;
+        std::vector<int> loop;
+        std::list<int> loopInterval;
+        std::vector<Edge*> bridgeEdges;
+        int interval = 0;
         do {
             Vertex* v = curEdge->vertex();
             if (curEdge->isBridge()) {
-                if (hasBrige) {
-                    tempFace->loops.append(tempLoop2);
-                    tempLoop2.setLogicalLength(0);
+                if (bridgeEdges.size() == 0) {
+                    bridgeEdges.emplace_back(curEdge);
                 }
-                hasBrige = !hasBrige;
-            }
-            else {
-                if (hasBrige) {
-                    tempLoop2.append(tempFace->pts.length());
+                else if (bridgeEdges.back()->partner() != curEdge) {
+                    if (loopInterval.size() == bridgeEdges.size()) {
+                        loopInterval.back() += interval;
+                    }
+                    else {
+                        loopInterval.emplace_back(interval);
+                    }
+                    bridgeEdges.emplace_back(curEdge);
                 }
                 else {
-                    tempLoop.append(tempFace->pts.length());
+                    AcGeIntArray tempLoop;
+                    if (loopInterval.size() == bridgeEdges.size()) {
+                        tempLoop.setLogicalLength(interval + loopInterval.back());
+                        loopInterval.pop_back();
+                    }
+                    else {
+                        tempLoop.setLogicalLength(interval);
+                    }
+                    for (int i = 0; i < tempLoop.length(); i++) {
+                        tempLoop[i] = loop[loop.size() - tempLoop.length() + i];
+                    }
+                    bridgeEdges.pop_back();
+                    tempFace->loops.append(tempLoop);
+                    loop.erase(loop.begin() + loop.size() - tempLoop.length(), loop.end());
                 }
+                interval = 0;
+            }
+            else {
+                interval++;
+                loop.emplace_back(tempFace->pts.length());
                 tempFace->pts.append((v->point()));
             }
             curEdge = curEdge->next();
         } while (curEdge != f->edgeLoop());
-        if (tempLoop.length() > 0) {
+        if (loop.size()) {
+            AcGeIntArray tempLoop;
+            tempLoop.setLogicalLength(int(loop.size()));
+            for (int i = 0; i < tempLoop.length(); i++) {
+                tempLoop[i] = loop[i];
+            }
             tempFace->loops.append(tempLoop);
         }
         tempFace->caculateBox();
         body.faces.append(tempFace);
     }
+#if test123
+    {
+        AcArray<AcGePoint3dArray> ptss;
+        AcGePoint3dArray ptss2;
+        std::ofstream file("C:\\新建文件夹\\inputs\\inputs\\spod1234.obj");
+        if (!file.is_open())
+        {
+            return;
+        }
+        for (auto& f : body.faces) {
+            if (f->loops.length() != 216) {
+                continue;
+            }
+            for (auto& loop : f->loops) {
+                AcGePoint3dArray pts;
+                for (auto& i : loop) {
+                    pts.append(f->pts[i]);
+                }
+                if (pts.length() != 16) {
+                    ptss.append(pts);
+                    ptss2.append(pts);
+                    file << "3dpoly " << "\n";
+                    for (auto& v : pts) {
+                        file << v.x << "," << v.y << "," << v.z << "\n";
+                    }
+                    file << "c" << "\n";
+                }
+            }
+            file.close();
+            break;
+        }
+    }
+#endif
     body.caculateBox();
 }
 
@@ -3796,6 +3859,13 @@ void bodyToBody(body2* bd, Body& body) {
 void test202561(Body* body, std::string filePath);
 Body* test202541(std::string filePath);
 
+void bodyTobody2(body2& a2, body& a) {
+    for (auto& f : a.faces) {
+        dealWithMultiLoops(*f);
+    }
+    compressVertex2(&a, a2);
+}
+
 void test202513() {
     AsdkBody* ent1 = (AsdkBody*)getAsdkBody();
     AsdkBody* ent2 = (AsdkBody*)getAsdkBody();
@@ -3807,6 +3877,15 @@ void test202513() {
     BodyTobody(&(ent2->body()), b);
     ent1->close();
     ent2->close();
+#if test123
+    body2 a2;
+    bodyTobody2(a2, a);
+    AsdkBody* ent11 = new AsdkBody();
+    bodyToBody(&a2, ent11->body());
+    AcDbObjectId id01;
+    addToModelSpace(id01, ent11);
+    return;
+#endif
     AinB.setLogicalLength(0); AoutB.setLogicalLength(0); BinA.setLogicalLength(0); BoutA.setLogicalLength(0);
     body2 ret;
     bodyBodyBool(a, b, Union, ret);
