@@ -2692,7 +2692,7 @@ void test(AcGeLine3d& l, std::vector<intersectPt>& arr, face& fa) {
                     }
                     else {
                         double param = vs[i].crossProduct(vs[next]).length() / (vsCrossLength[i] + vsCrossLength[next]);
-                        if ((vs[i] + vs[next]).dotProduct(lineDir) > 0) {
+                        if ((vs[i].normal() + vs[next].normal()).dotProduct(lineDir) > 0) {
                             arr.push_back({ change ,linePt + param * lineDir, param });
                         }
                         else {
