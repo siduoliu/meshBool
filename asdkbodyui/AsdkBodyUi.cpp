@@ -2514,15 +2514,64 @@ enum faceStatus
     bouta
 };
 
+struct loopBox
+{
+    AcGePoint3d min = AcGePoint3d(maxDouble, maxDouble, maxDouble);
+    AcGePoint3d max = AcGePoint3d(minDouble, minDouble, minDouble);
+};
+
 struct face {
     faceStatus status;
     bool bCoincide = false;
     bool bBox = false;
     AcArray<AcGeIntArray> loops;
+    AcArray<loopBox> loopBoxs;
+    AcGeIntArray loopMaxPtIndex;
+
     AcGeVector3d normal;
     AcGePoint3dArray pts;
     AcGePoint3d min = AcGePoint3d(maxDouble, maxDouble, maxDouble);
-    AcGePoint3d max = AcGePoint3d(minDouble, minDouble, minDouble);;
+    AcGePoint3d max = AcGePoint3d(minDouble, minDouble, minDouble);
+    void caculateLoopMaxPtIndex() {
+        loopMaxPtIndex.setLogicalLength(loops.length());
+        for (int i = 1; i < loops.length(); i++) {
+            auto& innerLoop = loops[i];
+            AcGePoint3d innerPt;
+            for (int i = 0; i < innerLoop.length(); i++) {
+                innerPt.x += pts[innerLoop[i]].x;
+                innerPt.y += pts[innerLoop[i]].y;
+                innerPt.z += pts[innerLoop[i]].z;
+            }
+            innerPt.x /= innerLoop.length(); innerPt.y /= innerLoop.length(); innerPt.z /= innerLoop.length();
+            double maxDist2 = 0;
+            int maxPtIndex = -1;
+            for (int i = 0; i < innerLoop.length(); i++) {
+                double tempDist2 = (pts[innerLoop[i]] - innerPt).lengthSqrd();
+                if (tempDist2 > maxDist2) {
+                    maxDist2 = tempDist2;
+                    maxPtIndex = i;
+                }
+            }
+            loopMaxPtIndex[i] = maxPtIndex;
+        }
+    }
+    void caculateLoopBoxs() {
+        loopBoxs.setLogicalLength(loops.length());
+        for (int i = 1; i < loopBoxs.length(); i++) {
+            AcGePoint3d loopmin = AcGePoint3d(maxDouble, maxDouble, maxDouble);
+            AcGePoint3d loopmax = AcGePoint3d(minDouble, minDouble, minDouble);
+            for (auto index : loops[i]) {
+                loopmin.x = std::min(loopmin.x, pts[index].x);
+                loopmin.y = std::min(loopmin.y, pts[index].y);
+                loopmin.z = std::min(loopmin.z, pts[index].z);
+                loopmax.x = std::max(loopmax.x, pts[index].x);
+                loopmax.y = std::max(loopmax.y, pts[index].y);
+                loopmax.z = std::max(loopmax.z, pts[index].z);
+            }
+            loopBoxs[i].min = loopmin;
+            loopBoxs[i].max = loopmax;
+        }
+    }
     void caculateBox() {
         for (auto& p : pts) {
             min.x = std::min(min.x, p.x);
@@ -3374,32 +3423,168 @@ void putBigLoopFront(face& face) {
     std::swap(face.loops[0], face.loops[maxLoop]);
 }
 
+bool passLoops(loopBox& bridge, face& face) {
+    AcGePoint3d p0;
+    p0.x = std::max(bridge.min.x, bridge.max.x);
+    p0.y = std::max(bridge.min.y, bridge.max.y);
+    p0.z = std::max(bridge.min.z, bridge.max.z);
+    AcGePoint3d p1;
+    p1.x = std::min(bridge.min.x, bridge.max.x);
+    p1.y = std::min(bridge.min.y, bridge.max.y);
+    p1.z = std::min(bridge.min.z, bridge.max.z);
+    for (int i = 1; i < face.loopBoxs.length() - 1; i++) {
+        if (p0.x < face.loopBoxs[i].min.x || p1.x > face.loopBoxs[i].max.x) {
+            continue;
+        }
+        if (p0.y < face.loopBoxs[i].min.y || p1.y > face.loopBoxs[i].max.y) {
+            continue;
+        }
+        if (p0.z < face.loopBoxs[i].min.z || p1.z > face.loopBoxs[i].max.z) {
+            continue;
+        }
+        face.loops.swap(i, face.loopBoxs.length() - 1);
+        face.loopBoxs.swap(i, face.loopBoxs.length() - 1);
+        face.loopMaxPtIndex.swap(i, face.loopBoxs.length() - 1);
+        return true;
+    }
+    return false;
+}
+
+void crossCurLoop(AcGeIntArray& innerLoop, AcGeIntArray& outterLoop, face& face, int& maxPtIndex, int minPtindex) {
+    double minDist2 = maxDouble;
+    maxPtIndex = -1;
+    for (int i = 0; i < innerLoop.length(); i++) {
+        double tempDist2 = (face.pts[innerLoop[i]] - face.pts[outterLoop[minPtindex]]).lengthSqrd();
+        if (tempDist2 < minDist2) {
+            minDist2 = tempDist2;
+            maxPtIndex = i;
+        }
+    }
+}
+#include <map>
+#include <vector>
+void updateMap(int pt, int index1, int index2, int index3, std::map<int, std::set<int>>& pts, std::map<int, std::set<int>>& pts2)
+{
+    auto& iter = pts.find(pt);
+    if (iter == pts.end()) {
+        std::set<int> vs;
+        vs.emplace(index2); vs.emplace(index3);
+        pts[pt] = vs;
+    }
+    else {
+        iter->second.emplace(index2);
+        iter->second.emplace(index3);
+    }
+    auto& iter2 = pts2.find(pt);
+    if (iter2 == pts2.end()) {
+        std::set<int> vs;
+        vs.emplace(index1);
+        pts2[pt] = vs;
+    }
+    else {
+        iter2->second.emplace(index1);
+    }
+}
+
+int findMinPtIndex(AcGeIntArray& outterLoop, int p0, int p1) {
+    for (int i = 0; i < outterLoop.length() - 1; i++) {
+        if (outterLoop[i] == p0 && outterLoop[i + 1] == p1) {
+            return i;
+        }
+        if (outterLoop[i] == p1 && outterLoop[i + 1] == p0) {
+            return i + 1;
+        }
+    }
+    if (outterLoop[0] == p0 && outterLoop.last() == p1) {
+        return 0;
+    }
+    if (outterLoop[0] == p1 && outterLoop.last() == p0) {
+        return outterLoop.length();
+    }
+    return -1;
+}
+
+void dealWithMultBridge(std::map<int, std::set<int>>& bridgePoints, std::map<int, std::set<int>>& bridgePoints2, AcGeIntArray& outterLoop, int& minPtindex, int innerPt, face& face) {
+    auto& iter2 = bridgePoints2.find(outterLoop[minPtindex]);
+    if (iter2 == bridgePoints2.end()) {
+        return;
+    }
+    auto& iter1 = bridgePoints.find(outterLoop[minPtindex]);
+    if (iter1 == bridgePoints.end()) {
+        return;
+    }
+    auto& ptArr2 = iter2->second;
+    std::vector<int> trueEdge;
+    std::vector<AcGeVector3d> edges1;
+    std::vector<int> bridgeEdge;
+    std::vector<AcGeVector3d> edges2;
+    AcGeVector3d normal;
+    bool hasNarmal = false;
+    AcGeVector3d curDir = (face.pts[innerPt] - face.pts[outterLoop[minPtindex]]).normalize();
+    for (auto i : ptArr2) {
+        bridgeEdge.push_back(i);
+        edges2.push_back((face.pts[i] - face.pts[outterLoop[minPtindex]]).normalize());
+        if (!hasNarmal && std::abs(curDir.dotProduct(edges2.back()) - 1) > 1e-10) {
+            normal = curDir.crossProduct(edges2.back());
+            hasNarmal = true;
+        }
+    }
+    auto& ptArr = iter1->second;
+    for (auto i : ptArr) {
+        trueEdge.push_back(i);
+        edges1.push_back((face.pts[i] - face.pts[outterLoop[minPtindex]]).normalize());
+        if (!hasNarmal && std::abs(curDir.dotProduct(edges1.back()) - 1) > 1e-10) {
+            normal = curDir.crossProduct(edges1.back());
+            hasNarmal = true;
+        }
+    }
+    std::set<double> angles2;
+    for (auto& dir : edges2) {
+        angles2.emplace(dir.angleTo(curDir, normal));
+    }
+    double angle1 = edges1[0].angleTo(curDir, normal);
+    double angle2 = edges1[1].angleTo(curDir, normal);
+    bool linkFirst = true;
+    if (angle1 > *angles2.begin()) {
+        if (angle1 < angle2) {
+            linkFirst = false;
+        }
+    }
+    else {
+        if (angle1 > angle2) {
+            linkFirst = false;
+        }
+    }
+    if (linkFirst) {
+        //连到trueEdge[0]对应的点
+        if (outterLoop[(minPtindex - 1 + outterLoop.length()) % outterLoop.length()] != trueEdge[0] && outterLoop[(minPtindex + 1) % outterLoop.length()] != trueEdge[0]) {
+            minPtindex = findMinPtIndex(outterLoop, outterLoop[minPtindex], trueEdge[0]);
+        }
+    }
+    else {
+        //连到trueEdge[1]对应的点
+        if (outterLoop[(minPtindex - 1 + outterLoop.length()) % outterLoop.length()] != trueEdge[1] && outterLoop[(minPtindex + 1) % outterLoop.length()] != trueEdge[1]) {
+            minPtindex = findMinPtIndex(outterLoop, outterLoop[minPtindex], trueEdge[1]);
+        }
+    }
+}
+
 void dealWithMultiLoops(face& face) {
+    std::map<int, std::set<int>> bridgePoints;//连接的普通边
+    std::map<int, std::set<int>> bridgePoints2;//连接的桥接边
     putBigLoopFront(face);
+    face.caculateLoopBoxs();
+    face.caculateLoopMaxPtIndex();
     while (face.loops.length() > 1) {
         //求内环的最远点
         AcGeIntArray& innerLoop = face.loops.last();
         if (innerLoop.length() < 3) {
             face.loops.removeLast();
+            face.loopBoxs.removeLast();
             continue;
         }
         AcGeIntArray& outterLoop = face.loops[0];
-        AcGePoint3d innerPt;
-        for (int i = 0; i < innerLoop.length(); i++) {
-            innerPt.x += face.pts[innerLoop[i]].x;
-            innerPt.y += face.pts[innerLoop[i]].y;
-            innerPt.z += face.pts[innerLoop[i]].z;
-        }
-        innerPt.x /= innerLoop.length(); innerPt.y /= innerLoop.length(); innerPt.z /= innerLoop.length();
-        double maxDist2 = 0;
-        int maxPtIndex = -1;
-        for (int i = 0; i < innerLoop.length(); i++) {
-            double tempDist2 = (face.pts[innerLoop[i]] - innerPt).lengthSqrd();
-            if (tempDist2 > maxDist2) {
-                maxDist2 = tempDist2;
-                maxPtIndex = i;
-            }
-        }
+        int maxPtIndex = face.loopMaxPtIndex.last();
         //求该点到外环的最近点
         double minDist2 = maxDouble;
         int minPtindex = -1;
@@ -3410,6 +3595,19 @@ void dealWithMultiLoops(face& face) {
                 minPtindex = i;
             }
         }
+        //穿过当前内环
+        crossCurLoop(innerLoop, outterLoop, face, maxPtIndex, minPtindex);
+        //穿过其他内环
+        if (passLoops(loopBox{ face.pts[innerLoop[maxPtIndex]], face.pts[outterLoop[minPtindex]] }, face)) {
+            continue;
+        }
+        //多桥边
+        dealWithMultBridge(bridgePoints, bridgePoints2, outterLoop, minPtindex, innerLoop[maxPtIndex], face);
+
+        updateMap(outterLoop[minPtindex], innerLoop[maxPtIndex], outterLoop[(minPtindex + 1) % outterLoop.length()], 
+            outterLoop[(minPtindex - 1 + outterLoop.length()) % outterLoop.length()], bridgePoints, bridgePoints2);
+        updateMap(innerLoop[maxPtIndex], outterLoop[minPtindex], innerLoop[(maxPtIndex + 1) % innerLoop.length()], 
+            innerLoop[(maxPtIndex - 1 + innerLoop.length()) % innerLoop.length()], bridgePoints, bridgePoints2);
         //添加内环
         AcGeIntArray newOutterLoop;
         for (int i = 0; i <= minPtindex; i++) {
@@ -3422,8 +3620,18 @@ void dealWithMultiLoops(face& face) {
         for (int i = minPtindex + 1; i < outterLoop.length(); i++) {
             newOutterLoop.append(outterLoop[i]);
         }
+#ifdef test123
+        AcGePoint3dArray pts, pts2;
+        for (auto i : face.loops[0]) {
+            pts.append(face.pts[i]);
+        }
+        for (auto i : newOutterLoop) {
+            pts2.append(face.pts[i]);
+        }
+#endif // test123
         face.loops[0] = newOutterLoop;
         face.loops.removeLast();
+        face.loopBoxs.removeLast();
     }
 }
 
@@ -3446,7 +3654,9 @@ void bodyBodyBool(body& a, body& b, boolType type, body2& ret) {
     addFaceToTemp(BinA, bina);
     addFaceToTemp(BoutA, bouta);
     for (auto& f : temp.faces) {
-        dealWithMultiLoops(*f);
+        if (f->loops.length() > 1) {
+            dealWithMultiLoops(*f);
+        }
     }
     compressVertex2(&temp, ret);
     caculateFace(ret);
@@ -3861,7 +4071,9 @@ Body* test202541(std::string filePath);
 
 void bodyTobody2(body2& a2, body& a) {
     for (auto& f : a.faces) {
-        dealWithMultiLoops(*f);
+        if (f->loops.length() > 1) {
+            dealWithMultiLoops(*f);
+        }
     }
     compressVertex2(&a, a2);
 }
@@ -3877,7 +4089,7 @@ void test202513() {
     BodyTobody(&(ent2->body()), b);
     ent1->close();
     ent2->close();
-#if test123
+#ifdef test123
     body2 a2;
     bodyTobody2(a2, a);
     AsdkBody* ent11 = new AsdkBody();
@@ -3888,7 +4100,7 @@ void test202513() {
 #endif
     AinB.setLogicalLength(0); AoutB.setLogicalLength(0); BinA.setLogicalLength(0); BoutA.setLogicalLength(0);
     body2 ret;
-    bodyBodyBool(a, b, Union, ret);
+    bodyBodyBool(a, b, Subtruct, ret);
     AsdkBody* ent = new AsdkBody();
     bodyToBody(&ret, ent->body());
     {
