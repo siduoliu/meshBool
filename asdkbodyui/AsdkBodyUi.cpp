@@ -2833,12 +2833,18 @@ struct intersectInfo {
 
 AcArray<face*> loopsToFaces(AcArray<AcGePoint3dArray>& loops, AcGeVector3d& normal);
 
-void faceToPts(face& f, AcGePoint3dArray& pts, AcGeIntArray& loopbool, bool bReverse) {
+void faceToPts(face& f, AcGePoint3dArray& pts, AcGeIntArray& loopbool, AcGeIntArray& loopPre, bool bReverse) {
     for (auto& loop : f.loops) {
         int next = pts.length();
         for (int i = 0; i < loop.length(); i++) {
             pts.append(f.pts[loop[bReverse ? loop.length() - i - 1 : i]]);
             loopbool.append(i + 1 + next);
+            if (i == 0) {
+                loopPre.append(loop.length() - 1 + next);
+            }
+            else {
+                loopPre.append(i - 1 + next);
+            }
         }
         loopbool.last() = next;
     }
@@ -3012,17 +3018,64 @@ AcArray<face*> facefaceWithNoIntersectPts(face& fa, face& fb, AcGePoint3dArray& 
 }
 
 void dealWithCoLine(AcGePoint3d& p0,AcGeVector3d& vq0p0, AcGeVector3d& vq0p1, AcGeVector3d& vp0q1,AcGePoint3d& q0,
-    AcArray<intersectInfo>& intersection_Point, int i, int j, bool bout, AcGeVector3d& vp, AcGeVector3d& vq)
+    AcArray<intersectInfo>& intersection_Point, int i, int j, bool bout, AcGeVector3d& vp, AcGeVector3d& vq, 
+    const AcGePoint3d& qpre, const AcGeVector3d& faNormal, const AcGePoint3d& ppre)
 {
     if (vq0p0.dotProduct(vq0p1) < 0 && vq0p1.lengthSqrd() > 1e-20) {
         //q0Îª½»µã
-        double pam = vq0p0.length() / vp.length();
-        intersection_Point.append(intersectInfo(pam + i, j, bout, q0));
+        AcGeVector3d area = vp.crossProduct(qpre - p0);
+        if (area.dotProduct(faNormal) > 1e-10) {
+            double pam = vq0p0.length() / vp.length();
+            intersection_Point.append(intersectInfo(pam + i, j, !vp.isCodirectionalTo(vq), q0));
+        } 
     }
     if (vq0p0.dotProduct(vp0q1) > 0 && vp0q1.lengthSqrd() > 1e-20) {
         //p0Îª½»µã
-        double pam = vq0p0.length() / vq.length();
-        intersection_Point.append(intersectInfo(i, j + pam, bout, p0));
+        if (vp.isCodirectionalTo(vq)) {
+            //q0ÐèÒªÎ»ÓÚpprep0×ó²à
+            AcGeVector3d area = vq0p0.crossProduct(p0 - ppre);
+            if (area.dotProduct(faNormal) > 1e-10) {
+                double pam = vq0p0.length() / vq.length();
+                intersection_Point.append(intersectInfo(i, j + pam, false, p0));
+            }
+        }
+        else {
+            //q1ÐèÒªÎ»ÓÚpprep0×ó²à
+            AcGeVector3d area = vp0q1.crossProduct(ppre - p0);
+            if (area.dotProduct(faNormal) > 1e-10) {
+                double pam = vq0p0.length() / vq.length();
+                intersection_Point.append(intersectInfo(i, j + pam, true, p0));
+            }
+        }
+        
+    }
+    if (vq0p0.isZeroLength()) {
+        //p0q0ÖØºÏ
+        if (vp.isCodirectionalTo(vq)) {
+            AcGeVector3d area = (p0 - ppre).crossProduct(qpre - ppre);
+            if (area.dotProduct(faNormal) > 1e-10) {
+                intersection_Point.append(intersectInfo(i, j, bout, q0));
+            }
+        }
+        else {//²»¹²Ïß
+            AcGeVector3d vpPre = ppre - p0;
+            AcGeVector3d vqPre = qpre - q0;
+            if (vpPre.isCodirectionalTo(vqPre) || vqPre.isCodirectionalTo(vp)) {
+                double angle1 = vp0q1.angleTo(vpPre, faNormal);
+                double angle2 = vp.angleTo(vpPre, faNormal);
+                if (angle1 > angle2) {
+                    return;
+                }
+            }
+            else if (vpPre.isCodirectionalTo(vq)) {
+                double angle1 = vqPre.angleTo(vpPre, faNormal);
+                double angle2 = vp.angleTo(vpPre, faNormal);
+                if (angle1 > angle2) {
+                    return;
+                }
+            }
+            intersection_Point.append(intersectInfo(i, j, bout, q0));
+        }
     }
 }
 
@@ -3073,7 +3126,8 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
     AcGePoint3dArray datap0;
     AcGePoint3dArray dataq0;
     AcGeIntArray loop0, loop1;//µ±Ç°¶¥µãµÄÏÂÒ»¸ö¶¥µãµÄË÷Òý
-    faceToPts(fa, datap0, loop0, false); faceToPts(fb, dataq0, loop1, !bInner);
+    AcGeIntArray loop0Pre, loop1Pre;//µ±Ç°¶¥µãµÄÉÏÒ»¸ö¶¥µãµÄË÷Òý
+    faceToPts(fa, datap0, loop0, loop0Pre, false); faceToPts(fb, dataq0, loop1, loop1Pre, !bInner);
     AcArray<intersectInfo> intersection_Point;
     for (int i = 0; i < datap0.length(); i++) {
         for (int j = 0; j < dataq0.length(); j++) {
@@ -3102,7 +3156,7 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
             }
             AcGeVector3d e1e2 = vp.crossProduct(vq);
             if (e1e2.lengthSqrd() < 1e-20) {
-                dealWithCoLine(p0, vq0p0, vq0p1, vp0q1, q0, intersection_Point, i, j, bout, vp, vq);
+                dealWithCoLine(p0, vq0p0, vq0p1, vp0q1, q0, intersection_Point, i, j, bout, vp, vq, dataq0[loop1Pre[j]], fa.normal, datap0[loop0Pre[i]]);
                 continue;
             }
             if (v2.lengthSqrd() < 1e-20 && vp0q1.dotProduct(p1 - q1) >= 0.0) {//q1Îª½»µã
@@ -3113,6 +3167,48 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
             }
             double pam1 = (p0 - q0).crossProduct(vq).length() / e1e2.length();
             double pam2 = (p0 + pam1 * vp).distanceTo(q0) / vq.length();
+            if (pam1 < 1e-10 && pam2 < 1e-10) {
+                AcGeVector3d vpPre = datap0[loop0Pre[i]] - p0;
+                AcGeVector3d vqPre = dataq0[loop1Pre[j]] - q0;
+                if (vpPre.isCodirectionalTo(vqPre) || vqPre.isCodirectionalTo(vp)) {
+                    double angle1 = vp0q1.angleTo(vpPre, fa.normal);
+                    double angle2 = vp.angleTo(vpPre, fa.normal);
+                    if (angle1 > angle2) {
+                        continue;
+                    }
+                }
+                else if (vpPre.isCodirectionalTo(vq)) {
+                    double angle1 = vqPre.angleTo(vpPre, fa.normal);
+                    double angle2 = vp.angleTo(vpPre, fa.normal);
+                    if (angle1 > angle2) {
+                        continue;
+                    }
+                }
+            }
+            else if (pam1 < 1e-10) {
+                AcGeVector3d vpPre = datap0[loop0Pre[i]] - p0;
+                if (vpPre.isCodirectionalTo(vq)) {//p0Î»ÓÚq0q1Ö®¼ä
+                    AcGeVector3d area = vp.crossProduct(q0 - p0);
+                    if (area.dotProduct(fa.normal) < 1e-10) {
+                        continue;
+                    }
+                }
+                else if (vpPre.isCodirectionalTo(-vq)) {
+                    AcGeVector3d area = vp.crossProduct(vp0q1);
+                    if (area.dotProduct(fa.normal) < 1e-10) {
+                        continue;
+                    }
+                }
+            }
+            else if (pam2 < 1e-10) {
+                AcGeVector3d vqPre = dataq0[loop1Pre[j]] - q0;
+                if (vqPre.isParallelTo(vp)) {//q0Î»ÓÚp0p1Ö®¼ä
+                    AcGeVector3d area = vp.crossProduct(vp0q1);
+                    if (area.dotProduct(fa.normal) < 1e-10) {//¸ÃÖØºÏ½»µã´¦²Ã¼ô¶à±ßÐÎÖ¸ÏòÍâ²¿»òÁ½¶Ë¶¼ÖØºÏ
+                        continue;
+                    }
+                }
+            }
             intersection_Point.append(intersectInfo(pam1 + i, pam2 + j, bout, p0 + (p1 - p0) * pam1));
         }
     }
@@ -3165,6 +3261,9 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
             //¿ªÊ¼±éÀú½»µãÐòÁÐb
             int iteratorStart = int(floor(intersection_Point[intersection_Pointb[aTob[i]]].p2));
             int iteratorEnd = int(floor(intersection_Point[intersection_Pointb[intersection_PointbNext[aTob[i]]]].p2));
+            if (intersection_Point[intersection_Pointb[intersection_PointbNext[aTob[i]]]].p2 - iteratorEnd < 1e-10) {
+                iteratorEnd -= 1;
+            }
             if (iteratorStart == iteratorEnd && intersection_Point[intersection_Pointb[aTob[i]]].p2 < intersection_Point[intersection_Pointb[intersection_PointbNext[aTob[i]]]].p2) {//Á½¸ö½»µãÔÚÍ¬Ò»Çø¼ä
                 i = bToa[intersection_PointbNext[aTob[i]]];
                 continue;
@@ -3180,6 +3279,9 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
             //¿ªÊ¼±éÀú½»µãÐòÁÐa
             int iteratorStart = int(floor(intersection_Point[intersection_Pointa[i]].p1));
             int iteratorEnd = int(floor(intersection_Point[intersection_Pointa[intersection_PointaNext[i]]].p1));
+            if (intersection_Point[intersection_Pointa[intersection_PointaNext[i]]].p1 - iteratorEnd < 1e-10) {
+                iteratorEnd -= 1;
+            }
             if (iteratorStart == iteratorEnd && intersection_Point[intersection_Pointa[i]].p1 < intersection_Point[intersection_Pointa[intersection_PointaNext[i]]].p1) {//Á½¸ö½»µãÔÚÍ¬Ò»Çø¼ä
                 i = intersection_PointaNext[i];
                 continue;
@@ -3366,6 +3468,9 @@ void compressVertex2(body* bd, body2& ret) {
     AcGePoint3dArray ptss;
     for (int i = 0; i < pts.size(); i++) {
         ptss.append(*pts[sortedIndex[i]]);
+    }
+    if (sortedIndex.size() <= 0) {
+        return;
     }
     pts2.push_back(*pts[sortedIndex[0]]);
     std::vector<int> sortedIndex2 = sortedIndex;
