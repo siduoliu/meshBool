@@ -3019,14 +3019,19 @@ AcArray<face*> facefaceWithNoIntersectPts(face& fa, face& fb, AcGePoint3dArray& 
 
 void dealWithCoLine(AcGePoint3d& p0,AcGeVector3d& vq0p0, AcGeVector3d& vq0p1, AcGeVector3d& vp0q1,AcGePoint3d& q0,
     AcArray<intersectInfo>& intersection_Point, int i, int j, bool bout, AcGeVector3d& vp, AcGeVector3d& vq, 
-    const AcGePoint3d& qpre, const AcGeVector3d& faNormal, const AcGePoint3d& ppre)
+    const AcGePoint3d& qpre, const AcGeVector3d& faNormal, const AcGePoint3d& ppre, bool bInner)
 {
+    //Óë½»µãÏàÁ¬µÄÀ´×ÔÓÚloopbµÄ±ßÒªÂäÔÚloopaÖÐ
     if (vq0p0.dotProduct(vq0p1) < 0 && vq0p1.lengthSqrd() > 1e-20) {
         //q0Îª½»µã
         AcGeVector3d area = vp.crossProduct(qpre - p0);
         if (area.dotProduct(faNormal) > 1e-10) {
             double pam = vq0p0.length() / vp.length();
             intersection_Point.append(intersectInfo(pam + i, j, !vp.isCodirectionalTo(vq), q0));
+            if (!bInner)
+            {
+				intersection_Point.last().bOut = !intersection_Point.last().bOut;
+            }
         } 
     }
     if (vq0p0.dotProduct(vp0q1) > 0 && vp0q1.lengthSqrd() > 1e-20) {
@@ -3037,6 +3042,10 @@ void dealWithCoLine(AcGePoint3d& p0,AcGeVector3d& vq0p0, AcGeVector3d& vq0p1, Ac
             if (area.dotProduct(faNormal) > 1e-10) {
                 double pam = vq0p0.length() / vq.length();
                 intersection_Point.append(intersectInfo(i, j + pam, false, p0));
+                if (!bInner)
+                {
+                    intersection_Point.last().bOut = !intersection_Point.last().bOut;
+                }
             }
         }
         else {
@@ -3045,6 +3054,10 @@ void dealWithCoLine(AcGePoint3d& p0,AcGeVector3d& vq0p0, AcGeVector3d& vq0p1, Ac
             if (area.dotProduct(faNormal) > 1e-10) {
                 double pam = vq0p0.length() / vq.length();
                 intersection_Point.append(intersectInfo(i, j + pam, true, p0));
+                if (!bInner)
+                {
+                    intersection_Point.last().bOut = !intersection_Point.last().bOut;
+                }
             }
         }
         
@@ -3054,18 +3067,32 @@ void dealWithCoLine(AcGePoint3d& p0,AcGeVector3d& vq0p0, AcGeVector3d& vq0p1, Ac
         if (vp.isCodirectionalTo(vq)) {
             AcGeVector3d area = (p0 - ppre).crossProduct(qpre - ppre);
             if (area.dotProduct(faNormal) > 1e-10) {
-                intersection_Point.append(intersectInfo(i, j, bout, q0));
+                //intersection_Point.append(intersectInfo(i, j, bout, q0));
+                intersection_Point.append(intersectInfo(i, j, false, q0));
+                if (!bInner)
+                {
+                    intersection_Point.last().bOut = !intersection_Point.last().bOut;
+                }
             }
         }
         else {//²»¹²Ïß
             AcGeVector3d vpPre = ppre - p0;
             AcGeVector3d vqPre = qpre - q0;
-            if (vpPre.isCodirectionalTo(vqPre) || vqPre.isCodirectionalTo(vp)) {
+            if (vpPre.isCodirectionalTo(vqPre)) {
                 double angle1 = vp0q1.angleTo(vpPre, faNormal);
                 double angle2 = vp.angleTo(vpPre, faNormal);
                 if (angle1 > angle2) {
                     return;
                 }
+                intersection_Point.append(intersectInfo(i, j, bInner, q0));
+            }
+            else if (vqPre.isCodirectionalTo(vp)) {
+                double angle1 = vp0q1.angleTo(vpPre, faNormal);
+                double angle2 = vp.angleTo(vpPre, faNormal);
+                if (angle1 > angle2) {
+                    return;
+                }
+                intersection_Point.append(intersectInfo(i, j, !bInner, q0));
             }
             else if (vpPre.isCodirectionalTo(vq)) {
                 double angle1 = vqPre.angleTo(vpPre, faNormal);
@@ -3073,8 +3100,19 @@ void dealWithCoLine(AcGePoint3d& p0,AcGeVector3d& vq0p0, AcGeVector3d& vq0p1, Ac
                 if (angle1 > angle2) {
                     return;
                 }
+                intersection_Point.append(intersectInfo(i, j, bInner, q0));
             }
-            intersection_Point.append(intersectInfo(i, j, bout, q0));
+            else {
+                double angle1 = vp.angleTo(vpPre, faNormal);
+                double angle2 = vq.angleTo(vpPre, faNormal);
+                double angle3 = vqPre.angleTo(vpPre, faNormal);
+                if (angle1 > angle2 && angle1 < angle3) {
+                    intersection_Point.append(intersectInfo(i, j, bInner, q0));
+                }
+                else if (angle1 > angle3 && angle1 < angle2) {
+                    intersection_Point.append(intersectInfo(i, j, !bInner, q0));
+                }
+            }
         }
     }
 }
@@ -3156,7 +3194,7 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
             }
             AcGeVector3d e1e2 = vp.crossProduct(vq);
             if (e1e2.lengthSqrd() < 1e-20) {
-                dealWithCoLine(p0, vq0p0, vq0p1, vp0q1, q0, intersection_Point, i, j, bout, vp, vq, dataq0[loop1Pre[j]], fa.normal, datap0[loop0Pre[i]]);
+                dealWithCoLine(p0, vq0p0, vq0p1, vp0q1, q0, intersection_Point, i, j, bout, vp, vq, dataq0[loop1Pre[j]], fa.normal, datap0[loop0Pre[i]], bInner);
                 continue;
             }
             if (v2.lengthSqrd() < 1e-20 && vp0q1.dotProduct(p1 - q1) >= 0.0) {//q1Îª½»µã
@@ -3262,7 +3300,7 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
             int iteratorStart = int(floor(intersection_Point[intersection_Pointb[aTob[i]]].p2));
             int iteratorEnd = int(floor(intersection_Point[intersection_Pointb[intersection_PointbNext[aTob[i]]]].p2));
             if (intersection_Point[intersection_Pointb[intersection_PointbNext[aTob[i]]]].p2 - iteratorEnd < 1e-10) {
-                iteratorEnd -= 1;
+                iteratorEnd = loop1Pre[iteratorEnd];
             }
             if (iteratorStart == iteratorEnd && intersection_Point[intersection_Pointb[aTob[i]]].p2 < intersection_Point[intersection_Pointb[intersection_PointbNext[aTob[i]]]].p2) {//Á½¸ö½»µãÔÚÍ¬Ò»Çø¼ä
                 i = bToa[intersection_PointbNext[aTob[i]]];
@@ -3280,7 +3318,7 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
             int iteratorStart = int(floor(intersection_Point[intersection_Pointa[i]].p1));
             int iteratorEnd = int(floor(intersection_Point[intersection_Pointa[intersection_PointaNext[i]]].p1));
             if (intersection_Point[intersection_Pointa[intersection_PointaNext[i]]].p1 - iteratorEnd < 1e-10) {
-                iteratorEnd -= 1;
+                iteratorEnd = loop0Pre[iteratorEnd];
             }
             if (iteratorStart == iteratorEnd && intersection_Point[intersection_Pointa[i]].p1 < intersection_Point[intersection_Pointa[intersection_PointaNext[i]]].p1) {//Á½¸ö½»µãÔÚÍ¬Ò»Çø¼ä
                 i = intersection_PointaNext[i];
