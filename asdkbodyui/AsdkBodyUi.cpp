@@ -2632,7 +2632,9 @@ enum Edgelocate {
 enum intersectStatus {
     change = 1,
     unknow = 0,
-    unchange = -1
+    unchange = -1,
+    leftUnknow = 2,
+    rightUnknow = 3
 };
 
 struct intersectPt
@@ -2857,6 +2859,107 @@ void invertArr(AcGeIntArray& arr, AcGeIntArray& ret) {
     }
 }
 
+//µã£¨ÉäÏß£©ÓëÃæfaµÄµÚloopIndex¸öloopµÄ°üº¬¹ØÏµ
+bool ptInLoop3(const AcGePoint3d& linePt, AcGeVector3d& lineDir, face& fa, int loopIndex, bool onAsIn = false) {
+    std::vector<intersectPt> arr;
+    auto& loop = fa.loops[loopIndex];
+    AcGeDoubleArray params(loop.length());
+    AcArray<bool> isOns(loop.length());
+    AcGeVector3dArray vs(loop.length());
+    AcGeVector3dArray vsCross(loop.length());
+    AcGeDoubleArray vsCrossLength(loop.length());
+    for (int i = 0; i < loop.length(); i++) {
+        vs.append(fa.pts[loop[i]] - linePt);
+        vsCross.append(vs.last().crossProduct(lineDir));
+        vsCrossLength.append(vsCross.last().length());
+        params.append((vs.last()).dotProduct(lineDir));
+        if (params.last() > 0 && (linePt + lineDir * params.last()).isEqualTo(fa.pts[loop[i]])) {
+            isOns.append(true);
+        }
+        else {
+            isOns.append(false);
+        }
+    }
+
+    for (int i = 0; i < loop.length(); i++) {
+        int prev = i - 1;
+        if (i == 0) {
+            prev = loop.length() - 1;
+        }
+        int next = i + 1;
+        if (i == loop.length() - 1) {
+            next = 0;
+        }
+        if (isOns[i]) {//Æðµã½»µã
+            if (isOns[next] && isOns[prev]) {//µ±Ç°¶ÎºÍÇ°¶ÎÎªÖØºÏ¶Î
+                continue;
+            }
+            else if (isOns[next]) {//µ±Ç°¶ÎÎªÖØºÏ¶Î
+                bool bLeft = vsCross[prev].dotProduct(fa.normal) > 0;
+                arr.push_back({ rightUnknow ,fa.pts[loop[i]], params[i] });
+                if (bLeft) {
+                    arr[arr.size() - 1].status = leftUnknow;
+                }
+            }
+            else if (isOns[prev]) {//Ç°¶ÎÎªÖØºÏ¶Î
+                bool bLeft = vsCross[next].dotProduct(fa.normal) > 0;
+                arr.push_back({ rightUnknow ,fa.pts[loop[i]], params[i] });
+                if (bLeft) {
+                    arr[arr.size() - 1].status = leftUnknow;
+                }
+            }
+            else if (vsCross[i].dotProduct(vsCross[prev]) > 0) {//·½ÏòÒ»ÖÂ
+                arr.push_back({ unchange ,fa.pts[loop[i]], params[i] });
+            }
+            else {
+                arr.push_back({ change ,fa.pts[loop[i]], params[i] });
+            }
+        }
+        else if (!isOns[next]) {//¿ÉÄÜÓÐÒ»¸öÄÚ²¿½»µã
+            if (vsCross[i].dotProduct(vsCross[next]) < 0) {//ÓÐÄÚ²¿½»µã£¬Á½¸ö¶Ëµã·Ö²¼ÔÚÁ½²à
+                //¼ÆËãÄÚ²¿½»µã
+                double param = vs[i].crossProduct(vs[next]).length() / (vsCrossLength[i] + vsCrossLength[next]);
+                if ((vs[i] + vs[next]).dotProduct(lineDir) > 0) {
+                    arr.push_back({ change ,linePt + param * lineDir, param });
+                }
+            }
+        }
+    }
+
+    std::sort(arr.begin(), arr.end(), [](intersectPt& i, intersectPt& j) {return i.param > j.param; });
+    for (int i = int(arr.size()) - 1; i >= 0; i--) {
+        if (arr[i].status == leftUnknow || arr[i].status == rightUnknow) {
+            if (arr[i - 1].status == arr[i].status) {
+                arr[i - 1].status = unchange;
+            }
+            else {
+                arr[i - 1].status = change;
+            }
+            arr[i].status = unchange;
+        }
+    }
+    Edgelocate lastLocate = out;
+    for (int i = 0; i < (int)arr.size(); i++) {
+        if (lastLocate == out) {
+            if (arr[i].status != unchange) {
+                lastLocate = in;
+            }
+            else {
+                lastLocate = out;
+            }
+        }
+        else if (lastLocate == in) {
+            if (arr[i].status != change) {
+                lastLocate = in;
+            }
+            else {
+                lastLocate = out;
+            }
+        }
+    }
+    return lastLocate == in;
+}
+
 bool ptInLoop2(const AcGePoint3d& linePt, AcGeVector3d& lineDir, face& fa) {
     std::vector<intersectPt> arr;
     for (auto& loop : fa.loops) {
@@ -2970,6 +3073,272 @@ bool ptInLoop(const AcGePoint3d& pt, AcGeVector3d& dir, AcGePoint3dArray& pts, A
         }
     }
     return intersectCount % 2 == 1;
+}
+
+AcGePoint3d getInnerPoint(face& fa, int loopIndex) {
+    for (int i = 0; i < fa.loops[loopIndex].length(); i++) {
+        const AcGePoint3d& p0 = fa.pts[fa.loops[loopIndex][i]];
+        const AcGePoint3d& p1 = fa.pts[fa.loops[loopIndex][i == fa.loops[loopIndex].length() - 1 ? 0 : i + 1 ]];
+        AcGeVector3d off = fa.normal.crossProduct(p1 - p0);
+        if (loopIndex > 0) {
+            off *= -1;
+        }
+        AcGePoint3d pMiddle = (p0 + p1.asVector()) * 0.5 + off.normalize() * 1e-6;
+        if (ptInLoop3(pMiddle, fa.normal.perpVector(), fa, loopIndex))
+        {
+            return pMiddle;
+        }
+    }
+    return fa.pts[0];
+}
+
+enum loopLoopPosition {
+    aInb,
+    bIna,
+    outab
+};
+
+loopLoopPosition judgeFaceALoopWithFaceBLoop(face& fa, int aIndex, face& fb, int bIndex) {
+    bool position1 = ptInLoop3(fa.pts[fa.loops[aIndex][0]], fa.normal.perpVector(), fb, bIndex);
+    if (position1)
+    {
+        return aInb;
+    }
+    bool position2 = ptInLoop3(fb.pts[fb.loops[bIndex][0]], fb.normal.perpVector(), fa, aIndex);
+    if (position2)
+    {
+        return bIna;
+    }
+    if (aIndex == 0) {
+        bool position3 = ptInLoop3(getInnerPoint(fa, aIndex), fa.normal.perpVector(), fb, bIndex);
+        if (position3)
+        {
+            return aInb;
+        }
+    }
+    else {
+        bool position3 = ptInLoop3(getInnerPoint(fb, bIndex), fb.normal.perpVector(), fa, aIndex);
+        if (position3)
+        {
+            return bIna;
+        }
+    }
+    return outab;
+}
+
+struct loopTreeNode
+{
+    loopTreeNode() {
+        curLoop = 0;
+    }
+    loopTreeNode(int index) {
+        curLoop = index;
+    }
+    loopTreeNode(const loopTreeNode& other) {
+        curLoop = other.curLoop;
+        nodeLoop = other.nodeLoop;
+    }
+    loopTreeNode operator= (const loopTreeNode& other) {
+        curLoop = other.curLoop;
+        nodeLoop = other.nodeLoop;
+        return *this;
+    }
+    int curLoop;
+    std::vector<loopTreeNode*> nodeLoop;
+
+};
+
+loopTreeNode* loopsToTree(AcArray<AcGeIntArray>& loops, int numOfFa) {
+    loopTreeNode* ret = new loopTreeNode();
+    AcArray<loopTreeNode*> deque;
+    if (loops[0].length() == 0) {//aÍâ»·Îªroot
+        ret->curLoop = 1;
+    }
+    else { //bÍâ»·Îªroot
+        ret->curLoop = -1;
+    }
+    deque.append(ret);
+    while (deque.length() > 0) {
+        loopTreeNode* cur = deque[0];
+        deque.removeFirst();
+        std::set<int> childrenTree;
+        for (int i = 0; i < loops.length(); i++) {
+            if (loops[i].length() == 0) {
+                continue;
+            }
+            if (loops[i].last() == cur->curLoop)
+            {
+                loops[i].removeLast();
+                if (loops[i].length() > 0) {
+                    childrenTree.insert(loops[i].last());
+                }
+                else {
+                    cur->nodeLoop.emplace_back(new loopTreeNode(i < numOfFa ? i + 1 : -(i - numOfFa + 1)));
+                }
+            }
+        }
+        for (auto& child : childrenTree) {
+            cur->nodeLoop.emplace_back(new loopTreeNode(child));
+            deque.append(cur->nodeLoop[cur->nodeLoop.size() - 1]);
+        }
+    }
+    return ret;
+}
+
+void faceLoopCopyToFace(face& fa, int index, face& target, bool reverse) {
+    AcGeIntArray loop = fa.loops[index];
+    for (int i = 0; i < fa.loops[index].length(); i++) {
+        loop[i] = target.pts.length();
+        target.pts.append(fa.pts[fa.loops[index][i]]);
+    }
+    if (reverse) {
+        for (int i = 0; i < loop.length() / 2; i++) {
+            std::swap(loop[i], loop[loop.length() - 1 - i]);
+        }
+    }
+    target.loops.append(loop);
+}
+
+AcArray<face*> facefaceWithNoIntersectPts2(face& fa, face& fb, AcGePoint3dArray& faPts, AcGePoint3dArray& fbPts, bool bInner) {
+    AcArray<face*> ret;
+    //¶à¸ö»·Ö®¼äÐèÒªÅÐ¶Ï°üº¬ÐÔ n*m
+    AcArray<AcGeIntArray> loops;
+    loops.setLogicalLength(fa.loops.length() + fb.loops.length());
+    for (int i = 0; i < fa.loops.length(); i++) {
+        AcGeIntArray temp;
+        if (i != 0)
+        {
+            temp.append(1);
+        }
+        loops[i] = temp;
+    }
+    for (int i = 0; i < fb.loops.length(); i++) {
+        AcGeIntArray temp;
+        if (i != 0)
+        {
+            temp.append(-1);
+        }
+        loops[i + fa.loops.length()] = temp;
+    }
+    bool breakJ0 = false;
+    for (int i = 0; i < fa.loops.length(); i++) {
+        for (int j = 0; j < fb.loops.length(); j++) {
+            if (j == 0 && breakJ0) {
+                continue;
+            }
+            loopLoopPosition pos = judgeFaceALoopWithFaceBLoop(fa, i, fb, j);
+            if (i == 0 && j == 0) {
+                if (pos == outab) {
+                    return ret;
+                }
+                else if (pos == aInb) {
+                    for (int index = 0; index < fa.loops.length(); index++) {
+                        loops[index].append(-1);
+                    }
+                    breakJ0 = true;
+                }
+                else {
+                    for (int index = 0; index < fb.loops.length(); index++) {
+                        loops[index + fa.loops.length()].append(1);
+                    }
+                    break;
+                }
+            }
+            else if (i == 0) {
+                if (pos == aInb){
+                    if (!bInner) {
+                        ret.append(new face(fb));
+                    }
+                    return ret;
+                }
+                else if (pos == bIna) {
+                    loops[j + fa.loops.length()].insertAt(0, 1);
+                }
+            }
+            else if (j == 0) {
+                if (pos == aInb) {
+                    loops[i].insertAt(0, -1);
+                }
+                else if (pos == bIna) {
+                    if (!bInner) {
+                        ret.append(new face(fb));
+                    }
+                    return ret;
+                }
+            }
+            else {
+                if (pos == aInb){
+                    loops[i].insertAt(0, -1 - j);
+                }
+                else if (pos == bIna) {
+                    loops[j + fa.loops.length()].insertAt(0, 1 + i);
+                }
+            }
+        }
+    }
+    //¸ù¾Ý°üº¬¹ØÏµÉú³É½á¹û
+    loopTreeNode* root = loopsToTree(loops, fa.loops.length());//×î¶àËÄ²ãÊ÷
+    if (bInner){//aÂäÔÚbµÄ²¿·Ö
+        for (auto& node : root->nodeLoop) {
+            if (node->curLoop * root->curLoop < 0) {
+                if (node->nodeLoop.size() == 0) {
+                    ret.append(new face(root->curLoop > 0 ? fb : fa));
+                    return ret;
+                }
+                face* tempRet = new face();
+                faceLoopCopyToFace(node->curLoop > 0 ? fa : fb, abs(node->curLoop) - 1, *tempRet, false);
+                for (auto& node2 : node->nodeLoop) {
+                    faceLoopCopyToFace(node2->curLoop > 0 ? fa : fb, abs(node2->curLoop) - 1, *tempRet, false);
+                }
+                ret.append(tempRet);
+            }
+        }
+    }
+    else {//aÂäÔÚbÍâµÄ²¿·Ö
+        if (root->curLoop > 0) {
+            face* tempRet = new face();
+            faceLoopCopyToFace(fa, 0, *tempRet, false);
+            for (auto& node : root->nodeLoop) {
+                faceLoopCopyToFace(node->curLoop > 0 ? fa : fb, abs(node->curLoop) - 1, *tempRet, node->curLoop < 0);
+            }
+            ret.append(tempRet);
+            for (auto& node2 : root->nodeLoop) {
+                if (node2->curLoop > 0 || node2->nodeLoop.size() == 0) {
+                    continue;
+                }
+                for (auto& node3 : node2->nodeLoop) {
+                    if (node3->curLoop > 0) {
+                        continue;
+                    }
+                    face* tempRet = new face();
+                    faceLoopCopyToFace(fb, abs(node3->curLoop) - 1, *tempRet, true);
+                    if (node3->nodeLoop.size() > 0) {
+                        faceLoopCopyToFace(fa, abs(node3->nodeLoop[0]->curLoop) - 1, *tempRet, false);
+                    }
+                    ret.append(tempRet);
+                }
+            }
+        }
+        else {
+            for (auto& node : root->nodeLoop) {
+                if (node->nodeLoop.size() == 0) {
+                    continue;
+                }
+                for (auto& node2 : node->nodeLoop) {
+                    if (node->curLoop * node2->curLoop < 0) {
+                        face* tempRet = new face();
+                        faceLoopCopyToFace(node2->curLoop > 0 ? fa : fb, abs(node2->curLoop) - 1, *tempRet, node->curLoop < 0);
+                        if (node2->nodeLoop.size() > 0) {
+                            faceLoopCopyToFace(fa, abs(node2->nodeLoop[0]->curLoop) - 1, *tempRet, false);
+                        }
+                        ret.append(tempRet);
+                    }
+                }
+            }
+        }
+    }
+    
+    return ret;
 }
 
 AcArray<face*> facefaceWithNoIntersectPts(face& fa, face& fb, AcGePoint3dArray& faPts, AcGePoint3dArray& fbPts, bool bInner) {
@@ -3251,7 +3620,7 @@ AcArray<face*> facefaceIntersect(face& fa, face& fb, bool bInner) {//faÎªÖ÷¶à±ßÐ
         }
     }
     if (0 == intersection_Point.length()) {
-        return facefaceWithNoIntersectPts(fa, fb, datap0, dataq0, bInner);
+        return facefaceWithNoIntersectPts2(fa, fb, datap0, dataq0, bInner);
     }
     //¹¹ÔìÁ½¸ö½»µãµÄarray,·Ö±ðÔÚfaºÍfbÅÅÐòµÄ
     AcGeIntArray intersection_Pointa;
@@ -3896,6 +4265,7 @@ void BodyTobody(Body* bd, body& body) {
             tempFace->loops.append(tempLoop);
         }
         tempFace->caculateBox();
+        putBigLoopFront(*tempFace);
         body.faces.append(tempFace);
     }
 #if test123
